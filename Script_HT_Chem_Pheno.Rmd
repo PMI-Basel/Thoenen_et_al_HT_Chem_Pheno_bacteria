@@ -1,0 +1,429 @@
+---
+title: "High-throughput chemical phenotyping of root bacteria"
+author: "Lisa Thoenen & Niklas Schandry"
+date: "2023"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cerulean
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+rm(list = ls())
+```
+
+```{r, warning=FALSE, include=FALSE, eval = FALSE}
+pckgs <- c("MESS", 
+           "emmeans", 
+           "dplyr", 
+           "magrittr",
+           "tidyr",
+           "ggplot2",
+           "readxl",
+           "ggthemes",
+           "stringr",
+           "purrr",
+           "dr4pl", 
+           "readr")
+# install.packages(pckgs)
+```
+
+```{r, include=TRUE, warning=FALSE,}
+library("MESS")
+library("emmeans")
+library("dplyr")
+library("magrittr")
+library("tidyr")
+library("ggplot2")
+library("readxl")
+library("ggthemes")
+library("stringr")
+library("purrr")
+library("dr4pl")
+library("readr")
+```
+
+# 1. Data import & organization
+
+Load required metadata which is a file with the strain ID, 
+the well position and the taxonomic assignment and eventual further information of the strain.
+
+```{r, message=FALSE, echo=FALSE}
+Strain_Data <- read_excel("Strain_Data.xlsx") %>%
+  # Remove unneeded columns
+  dplyr::select(-1,-Column, -Row) 
+
+# View data
+Strain_Data %>%
+  head() %>% 
+  knitr::kable()
+```
+
+Load the raw data from the measurements directly as excel files. Since the data series of each plate are saved in a separate workbook, we load the workbooks using a loop and combine them using a treatment label per plate (defined in labellist). Be careful to assign the correct plate to the correct treatment according to their order in the stack. More parameters can be defined in this list such as the medium used, the plate, the run and the chemical. 
+
+Provide a labellist for plate information, treatments are spread accross sheets in the table to be read.
+The first column contains the information on the number, the second for the treatment, the third for the concentration of the chemical, the fourth the chemical compound, the fifth the media, the sixth the preculture plate and the seventh the run.
+
+```{r, message=FALSE, echo=FALSE}
+labellist <- read_excel("labellist.xlsx")
+
+# View data
+labellist %>%
+  head() %>% 
+  knitr::kable()
+```
+
+```{r, warning=FALSE, include=FALSE}
+# Loop through sheets.
+results_raw <- tibble()
+for (i in 1:nrow(labellist)) {
+  tmp <- read_excel("Sample_data_HT_Chem_Pheno.xlsx", sheet = i, range = "B27:CU56") %>%   # change for duration runs
+          dplyr::select(-`T° 600`) %>% # Drop Temperature
+          tidyr::pivot_longer(names_to = "Well", values_to = "Density", cols = !starts_with("Time")) %>%
+          dplyr::mutate( Treat = as.character(labellist[i,2]),
+                         Run = as.character(labellist[i,7]),
+                         Plate = as.character(labellist[i,6]),
+                         Well_Plate = interaction(Well, Plate, sep = "_"))
+  results_raw <- bind_rows(results_raw, tmp)
+}
+```
+
+Creates time intervals form the time of the measurements. 
+```{r, warning=FALSE, include=FALSE}
+results_raw <- results_raw %>%
+   filter(!str_detect(Treat, "Dummy")) %>%
+   filter(Density != "NA") %>%
+   group_by(Run, Well_Plate, Treat) %>%
+   mutate(mins = difftime(Time, Time[1], units = "mins") %>% as.numeric(),
+          hrs = difftime(Time, Time[1], units = "hours") %>% as.numeric())  %>% 
+   ungroup() %>%
+   # Merge with metadata.
+   left_join(Strain_Data, by = c("Well_Plate","Well","Plate")) %>%
+   dplyr::select(-Time)
+```
+
+```{r, warning=FALSE, include=FALSE}
+results_raw <- results_raw %>%
+             mutate( Well_Row = Well %>% str_extract("[A-H]"),
+                     Well_Col = Well %>%
+                        str_extract("[0-9]+") %>% 
+                        as.numeric()) %>% 
+             dplyr::rename(Row = Well_Row, Column = Well_Col)        
+```
+
+```{r, warning=FALSE, include=FALSE}
+results_raw <- results_raw %>%
+      mutate(Conc = str_extract(Treat, "[0-9]+") %>% as.numeric(),
+             Compound = case_when(str_detect(Treat,"COMP") ~ "COMP",
+                               str_detect(Treat,"Ctrl") ~ "DMSO",
+                               TRUE ~ "NA"),
+             Media = case_when(str_detect(Treat,"TSB") ~ "TSB",
+                                str_detect(Treat,"MM") ~ "MM",
+                                TRUE ~ "NA")
+              ) %>%
+      mutate(across(where(is.character), as.factor))
+
+results_raw$Conc[is.na(results_raw$Conc)] <- 0
+```
+
+# 2.	Density delta
+
+Calculate the density delta by subtracting the density at the first measurement from the measurements at the following time points. 
+
+```{r, warning=FALSE, include=FALSE}
+results <- results_raw %>%
+  filter(!Strain %in% c("Ignore","None")) %>%
+  dplyr::arrange(mins) %>% 
+  group_by(Run, Well_Plate, Treat) %>%
+  mutate(Density_delta = Density - Density[1]) %>%
+  mutate(Density_initial = Density[1]) %>%
+  mutate(Density_max = max(Density)) %>%
+  ungroup %>%
+  as.data.frame()
+```
+
+Plot maximal density to check if all strains grew in the control treatment. 
+```{r, warning = FALSE, error = FALSE, echo=FALSE, message=FALSE, fig.dim = c(9, 7)}
+results %>% filter(Strain != "NBC") %>% 
+  filter(Conc %in% "0") %>% 
+  ggplot(aes(x=Strain, y = Density_max)) +
+  geom_boxplot(position=position_dodge()) + 
+  geom_point(aes(color= Genus), position=position_jitterdodge(0), alpha = 0.3, show.legend = FALSE) + 
+  geom_hline(yintercept  = 0.25)+
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90, hjust = 1)) +
+  labs(x = "Concentration [µM]",
+       y = "Density max", 
+       title = "Maximal density",
+       color = "Strain")
+
+```
+
+Remove strains which grow bad in the control manually (Density_max < 0.25 in Conc = 0)
+```{r}
+results %<>% filter(!Strain %in% "BIS-6")
+```
+
+
+# 3. Growth curves
+
+Check contamination in the control plate only containing medium ("media_control_plate").
+
+```{r, message=FALSE, echo=FALSE, error=FALSE, warning = FALSE, fig.dim = c(9, 7)}
+results %>% 
+  filter(Treat %in% "media_control_plate") %>% 
+  ggplot(aes(x=hrs, y= Density_delta, color = Run)) +
+  geom_line(show.legend = FALSE) +
+  facet_grid(Row ~ Column, scales = "fixed") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90, hjust = 1)) +
+  labs(x = "Time [hours]",
+       y = expression(OD ["600nm"]), 
+       title = "empty",
+       subtitle = "check for contamination", 
+       color = "Run")
+```
+
+```{r, message=FALSE, echo=FALSE, error=FALSE, warning = FALSE, fig.dim = c(9, 7)}
+results %>%  
+  filter(Conc %in% c("5000", "2500", "1250", "625", "500", "250", "0")) %>% 
+  mutate(Conc = factor(Conc, levels = c("5000", "2500", "1250", "625", "500", "250", "0"))) %>% 
+  mutate(Replicate = as.factor(Replicate)) %>% 
+  mutate(Run = as.factor(Run)) %>% 
+  filter(Compound %in% c("DMSO", "COMP")) %>% 
+  ggplot(aes(x=hrs, y= Density_delta, color = Conc)) +
+  stat_summary(geom = "line", size = 0.5, fun = "mean") +
+  facet_wrap(~ Strain, scales = "fixed") +
+  theme_bw() +
+  scale_color_manual(values = c("#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c", "#08306b", "#000740"),
+                     name=NULL,
+                     breaks=c("5000", "2500", "1250", "625", "500", "250", "0"),
+                     labels=c("5000 μM", "2500 μM", "1250 μM", "625 μM", "500 μM", "250 μM", "0 μM"))+
+  theme(axis.text.x = element_text(angle = -90, hjust = 1)) +
+  labs(x = "Time [hours]",
+       y = expression(OD ["600nm"]),
+       linetype = "Replicate")
+```
+
+# 4. Area under the curve
+
+To quantify the total bacterial growth over time, we calculate the total area under the curve (AUC).
+This is done with the function "auc()". To comparison between treatments, the total AUC (AUC_raw) is normalized by the AUC of the strain grown in the control treatment (no chemicals added, just normal growth media with DMSO). The normalized values are used for all further analysis, plotting and calculations. 
+
+```{r, warning=FALSE, include=FALSE}
+results_AUC <- results %>% 
+  dplyr::select(-Well_Plate, -Plate) %>%
+  unique() %>%
+  # filter(!Treat %in% c("empty", "glycerol_stock")) %>% 
+  filter(Density_delta > 0) %>% # removes 'negative' growth curves
+  group_by(Strain, Well, Treat, Run, Media, Replicate) %>%
+  summarize(AUC = auc(hrs, Density_delta), 
+            AUC_raw = auc(hrs, Density)) %>%
+  ungroup %>% 
+  mutate(Conc = str_extract(Treat, "[0-9]+") %>% as.numeric(),
+        Compound = case_when(grepl("COMP", Treat) ~ "COMP")) %>% 
+  mutate(Compound = as.factor(Compound),
+         Treat = as.factor(Treat),
+         Replicate = as.factor(Run),
+         Media = as.factor(Media)) %>% 
+  mutate(AUC_pos = abs(AUC)) %>% 
+  mutate(Strain_Replicate_Media_Run = paste(Strain, Replicate, Media, Run)) %>% 
+  #Split by Replicate
+  base::split(., .$Strain_Replicate_Media_Run) %>% #Make each strain / rep combination its own data.frane
+  map_dfr(~ mutate(.x, AUC_norm = AUC_pos / AUC_pos[length(AUC_pos)])) %>% 
+      #in each df, divide the AUC by the last AUC value; since Control does not start with a number, it is the last treatment
+  left_join(Strain_Data %>% 
+              dplyr::select(Strain, Phylum, Class, Order, Family, Genus) %>%
+              unique(),
+            by = "Strain") %>%
+  unique() %>% 
+  mutate(Conc = case_when(is.na(Conc) ~ 0,
+                          TRUE ~ Conc)) %>% 
+  as.data.frame() #transform into df
+
+
+## Save table with AUC
+write_rds(results_AUC, "results_AUC_Run1.rds")
+```
+
+remove strains with poor growth in the control treatment. 
+```{r}
+
+```
+
+
+Below, first we plot AUC values of all strains in all concentrations to get an insight in the overall growth of the strains. Then we plot the AUC_norm values to explore the relative growth reduction in the different concentrations of the chemical compared to the control treatment. 
+
+```{r, warning = FALSE, error = FALSE, echo=FALSE, message=FALSE, fig.dim = c(9, 7)}
+results_AUC %>%  
+  filter(Strain != "NBC") %>% 
+  filter(Media %in% "TSB") %>% 
+  ggplot(aes(x=as.factor(Conc), y= AUC)) +
+  geom_boxplot(position=position_dodge()) + 
+  geom_point(aes(color= Genus), position=position_jitterdodge(0), alpha = 0.3, show.legend = FALSE) + 
+  facet_wrap(~Strain, scales = "fixed") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90, hjust = 1)) +
+  labs(x = "Concentration [µM]",
+       y = "Absolute AUC", 
+       title = "Overall response",
+       color = "Strain")
+```
+
+AUC normalised to control.
+
+```{r, warning = FALSE, error = FALSE, echo=FALSE, message=FALSE, fig.dim = c(9, 7)}
+results_AUC %>%  
+  filter(Strain != "NBC") %>% 
+  filter(AUC_norm < 2) %>% 
+  ggplot(aes(x=as.factor(Conc), y= AUC_norm)) +
+  geom_boxplot(position=position_dodge()) + 
+  geom_point(aes(color= Genus), position=position_jitterdodge(0), alpha = 0.3, show.legend = FALSE) + 
+  facet_wrap(~Strain, scales = "fixed") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90, hjust = 1)) +
+  labs(x = "Concentration [µM]",
+       y = "Normalised AUC", 
+       title = "Overall response",
+       color = "Strain")
+```
+
+
+# 5. Tolerance index 
+
+To compare the tolerance among different bacterial strains, we use the tolerance index (TI). 
+The tolerance index is calculated from the area under the curve of the AUC of each strain in the different concentrations of the compounds, as further normalization the tolindex_norm is calculated from AUC_norm instead of AUC. Accordingly, a strain with TI_norm = 1 is completely tolerant to the compound in each concentration (not inhibited by the compound). Tolerance index is calculated for each compound separately using results_AUC from the respective compound. 
+
+```{r, warning=FALSE, include=FALSE, echo=F}
+AUC_tolind_COMP <- results_AUC %>% 
+  filter(Compound == "COMP") %>% 
+  filter(!Strain %in% c("no", NA)) %>% 
+  unique() %>%
+  group_by(Strain, Run) %>% 
+  mutate(AUC_max = paste(1)) %>%
+  dplyr::summarise(TI = auc(Conc, AUC_norm), 
+                   TI_raw = auc(Conc, AUC_raw),
+                   TI_max = auc(Conc, AUC_max)) %>% 
+  mutate(TI_norm = TI / TI_max)
+
+AUC_tolind_COMP <- left_join(AUC_tolind_COMP, Strain_Data %>%
+                   dplyr::select(Strain, Phylum, Family, Genus), by = "Strain") %>% 
+                   unique()
+
+## Save table
+write_rds(AUC_tolind_COMP, paste0("AUC_tolind_COMP.rds"))
+```
+
+```{r, include=FALSE}
+symnum.args <- list(cutpoints = c(0, 0.05, 1), symbols = c("*", "ns"))
+```
+
+```{r, echo=FALSE, error = FALSE, warning=FALSE, message = FALSE, fig.dim = c(9, 7)}
+AUC_tolind_COMP %>% 
+  filter(!Strain %in% "NBC") %>% 
+  ggplot(aes(x = reorder(Strain, desc(TI)), y = TI)) + # to sort the x levels using y value descending
+  geom_bar(aes(fill = Family), stat = "summary", show.legend = FALSE) +
+  geom_jitter(aes(shape = Run), width = 0.1)+
+  #ggpubr::stat_compare_means(method = "anova", aes(x = reorder(Strain, desc(TI)), y = TI), label.y.npc = 0.8, label.x.npc = 0.6) +
+  theme_bw() +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0, vjust = 0.5)) +
+  labs(x = "Strain",
+       y = "TI raw",
+       fill = "Family", 
+       title = "COMP tolerance index",
+       subtitle = "60 isolates")
+```
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE, error = FALSE, fig.dim = c(9, 7)}
+TI_COMP_ALL_legend <- AUC_tolind_COMP %>% 
+  filter(!Strain %in% "NBC") %>% 
+  filter(TI_norm < 1.3) %>% 
+  ggplot(aes(x = reorder(Strain, desc(TI_norm)), y = TI_norm)) + 
+  geom_bar(aes(fill = Family), stat = "summary", position = "dodge", show.legend = TRUE) +
+  #ggbeeswarm::geom_quasirandom(aes(fill = Family), alpha = 0.7, shape = 21,  width = 0.3, show.legend = FALSE)+
+  geom_errorbar(stat = "summary", width=0.2) +
+  geom_hline(colour = "grey50", yintercept = 0.75, size = 1/.pt) +
+  geom_hline(colour = "grey50", yintercept = 0.5, size = 1/.pt) +
+  ggpubr::stat_compare_means(label = "p.signif", method = "t.test", ref.group = "BIS-10", symnum.args = symnum.args, hide.ns = TRUE, label.y = 0.9) +
+# ggpubr::stat_compare_means(method = "anova", aes(x = reorder(Strain, desc(TI_norm)), y = TI_norm), label.y = 0.98, label.x.npc = 0.6) +
+# ggpubr::stat_compare_means(label = "p.signif", method = "t.test", ref.group = "BIS-10", symnum.args = symnum.args, hide.ns = TRUE, label.y = 0.9) +
+  theme_classic()+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
+  labs(title = "Tolerance index across all strains", 
+       fill = "Family", 
+       y = "TI", 
+       x = "")
+
+TI_COMP_ALL_legend
+```
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE, error = FALSE, fig.dim = c(3, 2)}
+TI_COMP_BIS24_BIS43 <- AUC_tolind_COMP %>% 
+  filter(TI_norm < 1.3) %>% 
+  filter(Strain %in% c("BIS-24", "BIS-43")) %>% 
+  droplevels() %>%
+  ggplot(aes(x = reorder(Strain, desc(TI_norm)), y = TI_norm)) + 
+  geom_bar(aes(fill = Family), stat = "summary", position = "dodge", show.legend = FALSE) +
+  ggbeeswarm::geom_quasirandom(aes(fill = Family), alpha = 0.7, shape = 21,  width = 0.3, show.legend = FALSE)+
+  geom_errorbar(stat = "summary", width=0.2) +
+  geom_hline(colour = "grey50", yintercept = 0.75, size = 1/.pt) +
+  geom_hline(colour = "grey50", yintercept = 0.5, size = 1/.pt) +
+  ggpubr::stat_compare_means(method = "t.test", aes(x = reorder(Strain, desc(TI_norm)), y = TI_norm), label.y = 0.98, cex = 7/.pt, label.x.npc = 0.2) +
+  theme_classic()+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))+
+  labs(title = "", 
+       fill = "Family", 
+       y = "TI", 
+       x = "")
+
+TI_COMP_BIS24_BIS43
+```
+
+# 6. Dose response
+
+```{r, warning=FALSE, include=FALSE, echo=F}
+library(dr4pl)
+
+dose_response <- results_AUC %>% 
+  filter(!is.na(Strain), !Strain == "NBC") %>%
+  {split(.,.$Strain)} %>%
+  map_dfr(~dr4pl(AUC~Conc, data=.x) %>% 
+            summary %>%
+            coef() %>%
+            tibble::rownames_to_column("Coef") %>% 
+            mutate(Strain = unique(.x$Strain) )) %>% 
+  filter(str_detect(Coef, "IC50")) %>%
+  set_colnames(c("Coef","Estimate","StdErr","lowerCI","upperCI","Strain")) %>% 
+  mutate(Estimate_exp = 10^Estimate) #actual value
+```
+
+```{r, warning=FALSE, include=FALSE, echo=F}
+dose_response <- left_join(dose_response, Strain_Data, by = "Strain")
+```
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE, error = FALSE, fig.dim = c(9, 7)}
+dose_response %>%
+  filter(!Strain %in% c("BIS-3", "BIS-2", "BIS-7", "BIS-10")) %>%
+  ggplot(aes(x = reorder(Strain, desc(Estimate)))) +
+  geom_errorbar(aes(y = Estimate, ymin = lowerCI, ymax = upperCI), width = 0.4) +
+  # geom_point(aes(y = Estimate), pch = 21, fill = "white") +
+  geom_bar(aes(y = Estimate, fill = Family), stat = "summary")+
+  theme_bw() +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
+  labs(title = "IC50 Estimates with 95% confidence intervals",
+       y = expression(log10("IC50")),
+       x = "Strain")
+```
+
+```{r}
+sessionInfo()
+```
