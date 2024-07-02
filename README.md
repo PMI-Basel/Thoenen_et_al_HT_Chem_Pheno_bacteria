@@ -1,13 +1,8 @@
 Customisable high-throughput chemical phenotyping of root bacteria
 ====================================
-Lisa Thoenen1, 2, Caitlin Giroud2, Claudia Probst2, Niklas Schandry3, Liza Rouyer3, Klaus Schlaeppi1, 2, *
+Lisa Thoenen, Caitlin Giroud, Claudia Probst, Niklas Schandry, Liza Rouyer, Klaus Schlaeppi*  
+*klaus.schlaeppi@unibas.ch
 
-1 Institute of Plant Sciences, University of Bern, 3013 Bern, Switzerland
-2 Department of Environmental Sciences, University of Basel, 4056 Basel, Switzerland
-3 LMU Biocenter, Faculty of Biology, Ludwig-Maximilians-University Munich, 82152 Martinsried, Germany
-*Correspondance: klaus.schlaeppi@unibas.ch
- 
- 
 This GitHub has the following files:
 ====================================
 
